@@ -1,17 +1,27 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environment
+# Virtual environments
 venv/
 env/
 ENV/
 .env
 
-# MacOS
+# OS files
 .DS_Store
+Thumbs.db
 
 # IDEs
 .vscode/
 .idea/
+
+# Local app data (IMPORTANT)
+.local/
+*.log
+
+# PyInstaller (future)
+dist/
+build/
+*.spec
