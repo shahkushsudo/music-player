@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import sys
+from html import escape
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import vlc
+from mutagen import File as MutagenFile
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3
 
@@ -40,6 +43,12 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QInputDialog,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QComboBox,
+    QCheckBox,
+    QSpinBox,
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QSizePolicy,
@@ -52,10 +61,13 @@ QUEUE_FILE = os.path.expanduser("~/.local/share/music-player/queue.json")
 LIKED_FILE = os.path.expanduser("~/.local/share/music-player/liked.json")
 RECENT_FILE = os.path.expanduser("~/.local/share/music-player/recent.json")
 SESSION_FILE = os.path.expanduser("~/.local/share/music-player/session.json")
+STATS_FILE = os.path.expanduser("~/.local/share/music-player/stats.json")
+SETTINGS_FILE = os.path.expanduser("~/.local/share/music-player/settings.json")
 APP_NAME = "Kush's Music"
 ICON_PATH = "/home/kush/music-player/assets/icon.png"
 LIKED_PLAYLIST_NAME = "❤️ Liked Songs"
 RECENT_PLAYLIST_NAME = "🕒 Recently Played"
+MOST_PLAYED_PLAYLIST_NAME = "🔥 Most Played"
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,7 @@ class Track:
     title: str
     artist: str
     album: str
+    duration_ms: int = 0
 
     @property
     def display_name(self) -> str:
@@ -134,6 +147,16 @@ def read_art_pixmap(path: str, size: int = 250) -> Optional[QPixmap]:
     except Exception:
         pass
     return None
+
+
+def read_duration_ms(path: str) -> int:
+    try:
+        audio = MutagenFile(path)
+        if audio is not None and getattr(audio, "info", None) is not None:
+            return int(float(audio.info.length) * 1000)
+    except Exception:
+        pass
+    return 0
 
 
 class MiniPlayer(QWidget):
@@ -294,7 +317,7 @@ class MiniPlayer(QWidget):
 
 
 class TrackListRow(QWidget):
-    def __init__(self, index: int, text: str, liked: bool, on_like_clicked):
+    def __init__(self, index: int, title_html: str, meta_text: str, liked: bool, on_like_clicked):
         super().__init__()
         self._base_index_text = f"{index}."
         self.index_label = QLabel(self._base_index_text)
@@ -314,15 +337,24 @@ class TrackListRow(QWidget):
         self.like_anim.setDuration(140)
         self.like_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        self.text_label = QLabel(text)
-        self.text_label.setStyleSheet("color: rgba(243,243,245,0.95);")
+        self.text_label = QLabel(title_html)
+        self.text_label.setTextFormat(Qt.TextFormat.RichText)
+        self.text_label.setStyleSheet("color: rgba(243,243,245,0.95); font-weight: 600;")
         self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.meta_label = QLabel(meta_text)
+        self.meta_label.setStyleSheet("color: rgba(243,243,245,0.62); font-size: 11px;")
+        self.meta_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(1)
+        text_col.addWidget(self.text_label)
+        text_col.addWidget(self.meta_label)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 2, 8, 2)
         layout.setSpacing(8)
         layout.addWidget(self.index_label, 0)
-        layout.addWidget(self.text_label, 1)
+        layout.addLayout(text_col, 1)
         layout.addWidget(self.like_btn, 0)
 
     def enterEvent(self, event):
@@ -422,6 +454,12 @@ class PremiumMusicPlayer(QMainWindow):
         self.playlists: Dict[str, List[str]] = {}  # name -> list[path]
         self.liked_paths: set[str] = set()
         self.recent_paths: List[str] = []
+        self.play_counts: Dict[str, int] = {}
+        self.settings: Dict[str, object] = {
+            "default_volume": 80,
+            "autoplay": True,
+            "theme": "dark",
+        }
 
         # ----- Playback state -----
         self.queue: List[Track] = []
@@ -433,11 +471,15 @@ class PremiumMusicPlayer(QMainWindow):
         self._last_state_track_path: Optional[str] = None
         self._last_state_position: int = 0
         self._last_state_was_playing: bool = False
+        self._track_end_handled: bool = False
+        self._play_count_registered_for_track: bool = False
 
         # ----- UI -----
         self._build_ui()
+        self._load_settings()
         self._load_playlists()
         self._load_music()
+        self._load_stats()
         self._load_liked()
         self._load_recent()
         self._load_queue()
@@ -450,7 +492,7 @@ class PremiumMusicPlayer(QMainWindow):
         self.progress_timer = QTimer()
         self.progress_timer.timeout.connect(self._update_progress)
         self.progress_timer.start(250)
-        self._set_volume(80)
+        self._set_volume(int(self.settings.get("default_volume", 80)))
         self._setup_shortcuts()
 
         # Mini-player disabled (user requested no mini-player).
@@ -488,6 +530,9 @@ class PremiumMusicPlayer(QMainWindow):
         self.search.setObjectName("search")
         self.search.setPlaceholderText("Search songs (title/artist)…")
         self.search.textChanged.connect(self._filter_tracks)
+        self.sort_box = QComboBox()
+        self.sort_box.addItems(["Name (A-Z)", "Recently Added", "Most Played", "Liked First"])
+        self.sort_box.currentTextChanged.connect(lambda _text: self._render_track_list())
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("tabs")
@@ -522,6 +567,7 @@ class PremiumMusicPlayer(QMainWindow):
         self.tabs.addTab(self.playlists_tab, "Playlists")
 
         side_layout.addWidget(self.search)
+        side_layout.addWidget(self.sort_box)
         side_layout.addWidget(self.tabs, 1)
 
         # ----- Main panel -----
@@ -582,8 +628,13 @@ class PremiumMusicPlayer(QMainWindow):
         self.subtitle.setGraphicsEffect(self.subtitle_fade)
 
         top_meta = QHBoxLayout()
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setObjectName("ghostBtnSmall")
+        self.settings_btn.setToolTip("Settings")
+        self.settings_btn.clicked.connect(self._open_settings)
         self.profile_chip = QLabel("👤 Kush")
         self.profile_chip.setObjectName("profileChip")
+        top_meta.addWidget(self.settings_btn, 0, Qt.AlignmentFlag.AlignRight)
         top_meta.addStretch(1)
         top_meta.addWidget(self.profile_chip, 0, Qt.AlignmentFlag.AlignRight)
         meta.addLayout(top_meta)
@@ -613,6 +664,10 @@ class PremiumMusicPlayer(QMainWindow):
         self.play_controls.addWidget(self.play)
         self.play_controls.addWidget(self.next)
         self.play_controls.addWidget(self.like_now_btn)
+        self.autoplay_btn = QPushButton("🔁 Auto: ON")
+        self.autoplay_btn.setObjectName("ghostBtnSmall")
+        self.autoplay_btn.clicked.connect(self._toggle_autoplay)
+        self.play_controls.addWidget(self.autoplay_btn)
         self.volume_label = QLabel("Vol")
         self.volume_label.setObjectName("timeLabel")
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
@@ -645,12 +700,18 @@ class PremiumMusicPlayer(QMainWindow):
         self.track_list = QListWidget()
         self.track_list.setObjectName("listGlass")
         self.track_list.itemClicked.connect(self.play_selected)
+        self.track_list.itemDoubleClicked.connect(self.play_selected)
         self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_list.customContextMenuRequested.connect(self._track_context_menu)
         self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.track_list.setSpacing(4)
+        self.track_list.setToolTip("Double-click to play")
 
         main_layout.addWidget(self.track_list, 2)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("timeLabel")
+        self.status_label.setStyleSheet("color: rgba(29,185,84,0.95); font-weight: 700;")
+        main_layout.addWidget(self.status_label)
 
         # Progress / seeking + time
         progRow = QHBoxLayout()
@@ -1006,7 +1067,10 @@ class PremiumMusicPlayer(QMainWindow):
             for f in mp3s:
                 path = os.path.join(root, f)
                 title, artist, album = read_track_tags(path)
-                self.library[folder].append(Track(path=path, title=title, artist=artist, album=album))
+                duration_ms = read_duration_ms(path)
+                self.library[folder].append(
+                    Track(path=path, title=title, artist=artist, album=album, duration_ms=duration_ms)
+                )
 
         # Populate folders
         self.folder_list.clear()
@@ -1029,11 +1093,89 @@ class PremiumMusicPlayer(QMainWindow):
         self.playlist_list.clear()
         self.playlist_list.addItem(LIKED_PLAYLIST_NAME)
         self.playlist_list.addItem(RECENT_PLAYLIST_NAME)
+        self.playlist_list.addItem(MOST_PLAYED_PLAYLIST_NAME)
         for name in sorted(self.playlists.keys()):
             self.playlist_list.addItem(name)
 
     def _save_playlists(self) -> None:
         safe_write_json(PLAYLIST_FILE, {"version": 2, "playlists": self.playlists})
+
+    def _load_settings(self) -> None:
+        raw = safe_load_json(SETTINGS_FILE, default={})
+        if isinstance(raw, dict):
+            self.settings.update(raw)
+        self._refresh_autoplay_button()
+
+    def _save_settings(self) -> None:
+        safe_write_json(SETTINGS_FILE, self.settings)
+
+    def _load_stats(self) -> None:
+        raw = safe_load_json(STATS_FILE, default={})
+        if isinstance(raw, dict):
+            cleaned = {}
+            for k, v in raw.items():
+                if isinstance(k, str) and isinstance(v, int):
+                    cleaned[k] = max(0, v)
+            self.play_counts = cleaned
+        else:
+            self.play_counts = {}
+
+    def _save_stats(self) -> None:
+        safe_write_json(STATS_FILE, self.play_counts)
+
+    def _show_status(self, text: str) -> None:
+        self.status_label.setText(text)
+        QTimer.singleShot(2500, lambda: self.status_label.setText(""))
+
+    def _refresh_autoplay_button(self) -> None:
+        if hasattr(self, "autoplay_btn"):
+            on = bool(self.settings.get("autoplay", True))
+            self.autoplay_btn.setText("🔁 Auto: ON" if on else "🔁 Auto: OFF")
+
+    def _toggle_autoplay(self) -> None:
+        current = bool(self.settings.get("autoplay", True))
+        self.settings["autoplay"] = not current
+        self._save_settings()
+        self._refresh_autoplay_button()
+        self._show_status("Auto-play enabled" if not current else "Auto-play disabled")
+
+    def _open_settings(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        form = QFormLayout(dialog)
+        volume = QSpinBox(dialog)
+        volume.setRange(0, 100)
+        volume.setValue(int(self.settings.get("default_volume", 80)))
+        autoplay = QCheckBox("Enable smart auto-play", dialog)
+        autoplay.setChecked(bool(self.settings.get("autoplay", True)))
+        theme = QComboBox(dialog)
+        theme.addItems(["dark", "light (future)"])
+        if str(self.settings.get("theme", "dark")).startswith("light"):
+            theme.setCurrentIndex(1)
+        form.addRow("Default volume", volume)
+        form.addRow("Auto-play", autoplay)
+        form.addRow("Theme", theme)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        form.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec():
+            self.settings["default_volume"] = int(volume.value())
+            self.settings["autoplay"] = bool(autoplay.isChecked())
+            self.settings["theme"] = str(theme.currentText())
+            self._save_settings()
+            self._set_volume(int(self.settings["default_volume"]))
+            self._refresh_autoplay_button()
+            self._show_status("Settings updated")
+
+    def _most_played_tracks(self) -> List[Track]:
+        ranked = sorted(self.play_counts.items(), key=lambda kv: kv[1], reverse=True)
+        out: List[Track] = []
+        for path, _count in ranked:
+            t = self._track_by_path(path)
+            if t is not None:
+                out.append(t)
+        return out
 
     def _load_liked(self) -> None:
         raw = safe_load_json(LIKED_FILE, default={})
@@ -1114,6 +1256,7 @@ class PremiumMusicPlayer(QMainWindow):
         self._current_track = track
         self.player.set_media(vlc.Media(track.path))
         self.player.pause()
+        QTimer.singleShot(120, lambda: self.player.set_time(self._last_state_position))
         self.title.setText(track.title)
         self.artist.setText(track.artist)
         self.subtitle.setText(track.album or "")
@@ -1184,8 +1327,10 @@ class PremiumMusicPlayer(QMainWindow):
             return
         if path in self.liked_paths:
             self.liked_paths.remove(path)
+            self._show_status("Removed from liked songs")
         else:
             self.liked_paths.add(path)
+            self._show_status("Added to liked songs")
         self._save_liked()
         self._update_now_like_button()
         if self.current_playlist_name == LIKED_PLAYLIST_NAME:
@@ -1283,6 +1428,14 @@ class PremiumMusicPlayer(QMainWindow):
             self.view_tracks = list(self.view_base_tracks)
             self._render_track_list()
             return
+        if name == MOST_PLAYED_PLAYLIST_NAME:
+            self.current_playlist_name = name
+            tracks = self._most_played_tracks()
+            self.view_kind = "playlist"
+            self.view_base_tracks = list(tracks)
+            self.view_tracks = list(self.view_base_tracks)
+            self._render_track_list()
+            return
 
         if name not in self.playlists:
             return
@@ -1316,7 +1469,7 @@ class PremiumMusicPlayer(QMainWindow):
 
         filtered = []
         for t in all_tracks:
-            blob = f"{t.title} {t.artist} {t.album}".lower()
+            blob = f"{t.title} {t.artist} {t.album} {os.path.basename(t.path)}".lower()
             if q in blob:
                 filtered.append(t)
         self.view_tracks = filtered
@@ -1324,27 +1477,38 @@ class PremiumMusicPlayer(QMainWindow):
 
     def _render_track_list(self) -> None:
         self.track_list.clear()
-        self.song_count_label.setText(f"{len(self.view_tracks)} songs")
+        tracks = self._sorted_tracks(self.view_tracks)
+        self.song_count_label.setText(f"{len(tracks)} songs")
         if self.view_kind == "library":
-            self.list_header_label.setText(f"Library • {len(self.view_tracks)} songs")
+            self.list_header_label.setText(f"Library • {len(tracks)} songs")
         elif self.current_playlist_name:
-            self.list_header_label.setText(f"{self.current_playlist_name} • {len(self.view_tracks)} songs")
+            self.list_header_label.setText(f"{self.current_playlist_name} • {len(tracks)} songs")
         else:
-            self.list_header_label.setText(f"Tracks • {len(self.view_tracks)} songs")
-        if not self.view_tracks:
+            self.list_header_label.setText(f"Tracks • {len(tracks)} songs")
+        if not tracks:
             empty = QListWidgetItem("🎵 No songs found\nTry adding music to your folder")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             self.track_list.addItem(empty)
             return
 
-        for i, t in enumerate(self.view_tracks, start=1):
+        q = self.search.text().strip()
+        for i, t in enumerate(tracks, start=1):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, t.path)
-            item.setToolTip(f"{t.title}\n{t.artist}\n{t.album}")
+            item.setToolTip(f"{t.title}\n{t.artist}\n{t.album}\nDouble-click to play")
             self.track_list.addItem(item)
+            meta_parts = []
+            if t.artist:
+                meta_parts.append(t.artist)
+            if t.album:
+                meta_parts.append(t.album)
+            if t.duration_ms > 0:
+                meta_parts.append(format_time(t.duration_ms))
+            meta_text = " • ".join(meta_parts) if meta_parts else os.path.basename(t.path)
             row = TrackListRow(
                 i,
-                t.display_name,
+                self._highlight_match(t.display_name, q),
+                meta_text,
                 self._is_liked(t.path),
                 on_like_clicked=lambda _=False, p=t.path: self._toggle_like(p),
             )
@@ -1352,6 +1516,32 @@ class PremiumMusicPlayer(QMainWindow):
 
         # Keep selection in sync
         self._sync_highlight_to_current_track()
+
+    def _highlight_match(self, text: str, query: str) -> str:
+        base = escape(text)
+        if not query:
+            return base
+        low = text.lower()
+        q = query.lower()
+        i = low.find(q)
+        if i < 0:
+            return base
+        before = escape(text[:i])
+        mid = escape(text[i : i + len(query)])
+        after = escape(text[i + len(query) :])
+        return f"{before}<span style='color:#1db954;font-weight:700;'>{mid}</span>{after}"
+
+    def _sorted_tracks(self, tracks: List[Track]) -> List[Track]:
+        mode = self.sort_box.currentText() if hasattr(self, "sort_box") else "Name (A-Z)"
+        if mode == "Name (A-Z)":
+            return sorted(tracks, key=lambda t: t.display_name.lower())
+        if mode == "Recently Added":
+            return sorted(tracks, key=lambda t: os.path.getmtime(t.path) if os.path.exists(t.path) else 0, reverse=True)
+        if mode == "Most Played":
+            return sorted(tracks, key=lambda t: self.play_counts.get(t.path, 0), reverse=True)
+        if mode == "Liked First":
+            return sorted(tracks, key=lambda t: (0 if t.path in self.liked_paths else 1, t.display_name.lower()))
+        return tracks
 
     def _sync_highlight_to_current_track(self) -> None:
         if not self._current_track:
@@ -1424,8 +1614,10 @@ class PremiumMusicPlayer(QMainWindow):
     def enqueue_track(self, track: Track, play_next: bool = False) -> None:
         if play_next:
             self.queue.insert(0, track)
+            self._show_status("Playing next")
         else:
             self.queue.append(track)
+            self._show_status("Added to queue")
         self._render_queue_list()
         self._save_queue()
 
@@ -1529,6 +1721,32 @@ class PremiumMusicPlayer(QMainWindow):
             if cur_idx is not None and cur_idx < len(self.view_tracks) - 1:
                 self._play_track(self.view_tracks[cur_idx + 1], add_to_history=True, from_queue=False)
 
+    def _smart_autoplay_next_track(self) -> Optional[Track]:
+        if self._current_track is None:
+            return None
+        current_path = self._current_track.path
+        current_folder = os.path.dirname(current_path)
+        same_folder = []
+        for tracks in self.library.values():
+            for t in tracks:
+                if os.path.dirname(t.path) == current_folder and t.path != current_path:
+                    same_folder.append(t)
+        same_folder = sorted(same_folder, key=lambda t: t.path.lower())
+        if same_folder:
+            for t in same_folder:
+                if t.path > current_path:
+                    return t
+            return same_folder[0]
+
+        all_tracks = [t for tracks in self.library.values() for t in tracks if t.path != current_path]
+        if not all_tracks:
+            return None
+        return random.choice(all_tracks)
+
+    def _increment_play_count(self, path: str) -> None:
+        self.play_counts[path] = self.play_counts.get(path, 0) + 1
+        self._save_stats()
+
     def play_previous(self) -> None:
         self.current_queue_track_path = None
         self._render_queue_list()
@@ -1595,6 +1813,7 @@ class PremiumMusicPlayer(QMainWindow):
             self.current_queue_track_path = None
         self._render_queue_list()
         self._save_queue()
+        self._show_status("Removed from queue")
 
     def remove_selected_queue_item(self) -> None:
         item = self.queue_list.currentItem()
@@ -1610,6 +1829,7 @@ class PremiumMusicPlayer(QMainWindow):
         self.current_queue_track_path = None
         self._render_queue_list()
         self._save_queue()
+        self._show_status("Queue cleared")
 
     def _on_queue_rows_moved(self, *_args) -> None:
         # Rebuild queue in the new visual order after drag-and-drop.
@@ -1673,6 +1893,8 @@ class PremiumMusicPlayer(QMainWindow):
                 self.history_pos = len(self.history) - 1
 
         self._current_track = track
+        self._track_end_handled = False
+        self._play_count_registered_for_track = False
 
         # Update selection + mini-player immediately (so highlight feels responsive),
         # while audio loads during fade.
@@ -1705,8 +1927,10 @@ class PremiumMusicPlayer(QMainWindow):
             if pix is not None:
                 self._art_cache[track.path] = pix
         if pix:
+            self.art.setFixedSize(238, 238)
             self.art.setPixmap(pix)
             self.art.setText("")
+            QTimer.singleShot(120, lambda: self.art.setFixedSize(250, 250))
         else:
             self.art.setPixmap(QPixmap())
             self.art.setText("No Art")
@@ -1797,9 +2021,34 @@ class PremiumMusicPlayer(QMainWindow):
         if not self._user_seeking and length > 0:
             self.slider.setValue(pos)
         self.elapsed.setText(format_time(pos))
+
+        if self._current_track is not None and pos >= 10000 and not self._play_count_registered_for_track:
+            self._increment_play_count(self._current_track.path)
+            self._play_count_registered_for_track = True
+            if self.current_playlist_name == MOST_PLAYED_PLAYLIST_NAME:
+                self.view_base_tracks = self._most_played_tracks()
+                self.view_tracks = list(self.view_base_tracks)
+                self._render_track_list()
+
         if self._current_track is not None and abs(pos - self._last_saved_state_pos) >= 5000:
             self._save_state(self._current_track.path, pos, was_playing=bool(is_playing))
             self._last_saved_state_pos = pos
+
+        if self._current_track is not None and not self._track_end_handled:
+            ended = False
+            try:
+                ended = self.player.get_state() == vlc.State.Ended
+            except Exception:
+                ended = False
+            if ended or (length > 0 and pos >= max(0, length - 350)):
+                self._track_end_handled = True
+                if self.queue:
+                    self.play_next()
+                elif bool(self.settings.get("autoplay", True)):
+                    nxt = self._smart_autoplay_next_track()
+                    if nxt is not None:
+                        self._show_status("Auto-playing next track")
+                        self._play_track(nxt, add_to_history=True, from_queue=False)
 
         # mini-player disabled
 
