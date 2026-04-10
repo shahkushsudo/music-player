@@ -17,6 +17,7 @@ from mutagen.id3 import ID3
 from PyQt6.QtCore import (
     QEasingCurve,
     QPoint,
+    QSize,
     QParallelAnimationGroup,
     QPropertyAnimation,
     QSequentialAnimationGroup,
@@ -24,7 +25,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -317,12 +318,12 @@ class MiniPlayer(QWidget):
 
 
 class TrackListRow(QWidget):
-    def __init__(self, index: int, title_html: str, meta_text: str, liked: bool, on_like_clicked):
+    def __init__(self, index: int, title_html: str, meta_text: str, duration_text: str, liked: bool, on_like_clicked):
         super().__init__()
         self._base_index_text = f"{index}."
         self.index_label = QLabel(self._base_index_text)
         self.index_label.setFixedWidth(26)
-        self.index_label.setStyleSheet("color: rgba(243,243,245,0.62); font-weight: 600;")
+        self.index_label.setStyleSheet("color: #A0A0A0; font-weight: 600; font-size: 12px;")
 
         self.like_btn = QPushButton("♥" if liked else "♡")
         self.like_btn.setObjectName("trackLikeBtn")
@@ -339,41 +340,70 @@ class TrackListRow(QWidget):
 
         self.text_label = QLabel(title_html)
         self.text_label.setTextFormat(Qt.TextFormat.RichText)
-        self.text_label.setStyleSheet("color: rgba(243,243,245,0.95); font-weight: 600;")
+        self.text_label.setStyleSheet("color: #EDEDED; font-weight: 600; font-size: 14px;")
         self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.meta_label = QLabel(meta_text)
-        self.meta_label.setStyleSheet("color: rgba(243,243,245,0.62); font-size: 11px;")
+        self.meta_label.setStyleSheet("color: #A0A0A0; font-size: 12px; font-weight: 400;")
         self.meta_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.duration_label = QLabel(duration_text)
+        self.duration_label.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: 400;")
+        self.duration_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.duration_label.setMinimumWidth(46)
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(1)
+        text_col.setSpacing(2)
         text_col.addWidget(self.text_label)
         text_col.addWidget(self.meta_label)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
         layout.addWidget(self.index_label, 0)
         layout.addLayout(text_col, 1)
+        layout.addWidget(self.duration_label, 0)
         layout.addWidget(self.like_btn, 0)
+        self.setMinimumHeight(40)
+        self._hover_alpha = 0.0
+        self._is_active = False
 
     def enterEvent(self, event):
         self.index_label.setText("▶")
-        self.index_label.setStyleSheet("color: rgba(29,185,84,0.96); font-weight: 700;")
+        self.index_label.setStyleSheet("color: #22c55e; font-weight: 700; font-size: 12px;")
         self.like_anim.stop()
         self.like_anim.setStartValue(self.like_opacity.opacity())
         self.like_anim.setEndValue(1.0)
         self.like_anim.start()
+        self._hover_alpha = 1.0
+        self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self.index_label.setText(self._base_index_text)
-        self.index_label.setStyleSheet("color: rgba(243,243,245,0.62); font-weight: 600;")
+        self.index_label.setStyleSheet("color: #A0A0A0; font-weight: 600; font-size: 12px;")
         self.like_anim.stop()
         self.like_anim.setStartValue(self.like_opacity.opacity())
         self.like_anim.setEndValue(0.0)
         self.like_anim.start()
+        self._hover_alpha = 0.0
+        self.update()
         super().leaveEvent(event)
+
+    def set_active(self, active: bool) -> None:
+        self._is_active = active
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._hover_alpha > 0:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, int(16 * self._hover_alpha)))
+            p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 10, 10)
+        if self._is_active:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(34, 197, 94, 230))
+            p.drawRoundedRect(2, 4, 4, max(8, self.height() - 8), 2, 2)
+        super().paintEvent(event)
 
 
 class WaveformWidget(QWidget):
@@ -529,7 +559,11 @@ class PremiumMusicPlayer(QMainWindow):
         self.search = QLineEdit()
         self.search.setObjectName("search")
         self.search.setPlaceholderText("Search songs (title/artist)…")
-        self.search.textChanged.connect(self._filter_tracks)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._filter_tracks)
+        self.search.textChanged.connect(self._schedule_filter)
         self.sort_box = QComboBox()
         self.sort_box.addItems(["Name (A-Z)", "Recently Added", "Most Played", "Liked First"])
         self.sort_box.currentTextChanged.connect(lambda _text: self._render_track_list())
@@ -808,7 +842,7 @@ class PremiumMusicPlayer(QMainWindow):
                 border-radius: 18px;
             }
             QPushButton {
-                background: rgba(255,255,255,0.06);
+                background-color: rgba(255,255,255,0.06);
                 border: 1px solid rgba(255,255,255,0.10);
                 color: #f3f3f5;
                 border-radius: 14px;
@@ -816,11 +850,15 @@ class PremiumMusicPlayer(QMainWindow):
                 font-weight: 600;
             }
             QPushButton:hover {
-                background: rgba(29,185,84,0.18);
+                background-color: rgba(29,185,84,0.18);
                 border: 1px solid rgba(29,185,84,0.35);
             }
             QPushButton:pressed {
-                background: rgba(29,185,84,0.35);
+                background-color: rgba(29,185,84,0.35);
+            }
+            QPushButton:disabled {
+                background-color: rgba(255,255,255,0.04);
+                color: rgba(255,255,255,0.4);
             }
 
             QWidget#root QLineEdit#search {
@@ -867,7 +905,8 @@ class PremiumMusicPlayer(QMainWindow):
             QListWidget#listGlass {
                 background: transparent;
                 border: none;
-                color: rgba(243,243,245,0.95);
+                color: #EDEDED;
+                font-size: 13px;
                 outline: none;
             }
             QListWidget#listGlass::item {
@@ -876,26 +915,28 @@ class PremiumMusicPlayer(QMainWindow):
                 margin: 1px 0px;
             }
             QListWidget#listGlass::item:hover {
-                background: rgba(255,255,255,0.07);
+                background: rgba(255,255,255,0.06);
             }
             QListWidget#listGlass::item:selected {
-                background: rgba(29,185,84,0.95);
-                color: rgba(0,0,0,0.95);
+                background: rgba(34, 197, 94, 0.15);
+                color: #EDEDED;
+                border-left: 4px solid #22c55e;
             }
 
             QLabel#trackTitle {
-                color: #f3f3f5;
-                font-size: 22px;
-                font-weight: 800;
+                color: #EDEDED;
+                font-size: 17px;
+                font-weight: 600;
             }
             QLabel#trackArtist {
-                color: rgba(243,243,245,0.70);
-                font-size: 14px;
-                font-weight: 650;
+                color: #A0A0A0;
+                font-size: 13px;
+                font-weight: 400;
             }
             QLabel#trackSub {
-                color: rgba(243,243,245,0.60);
-                font-size: 12.5px;
+                color: #6B7280;
+                font-size: 12px;
+                font-weight: 400;
             }
             QLabel#profileChip {
                 background: rgba(255,255,255,0.08);
@@ -968,13 +1009,13 @@ class PremiumMusicPlayer(QMainWindow):
             QPushButton#trackLikeBtn {
                 background: transparent;
                 border: none;
-                color: rgba(243,243,245,0.88);
+                color: #A0A0A0;
                 font-size: 15px;
                 min-width: 28px;
                 max-width: 28px;
             }
             QPushButton#trackLikeBtn:hover {
-                color: rgba(255,77,109,0.95);
+                color: #ff4d6d;
             }
 
             QSlider#progress::groove:horizontal {
@@ -1021,16 +1062,16 @@ class PremiumMusicPlayer(QMainWindow):
             }
 
             QLabel#timeLabel {
-                color: rgba(243,243,245,0.70);
-                font-size: 12.5px;
-                font-weight: 650;
+                color: #A0A0A0;
+                font-size: 12px;
+                font-weight: 500;
                 min-width: 42px;
             }
 
             QLabel#queueTitle {
-                color: rgba(243,243,245,0.80);
+                color: #EDEDED;
                 font-size: 14px;
-                font-weight: 800;
+                font-weight: 600;
             }
 
             QLabel#art {
@@ -1475,6 +1516,9 @@ class PremiumMusicPlayer(QMainWindow):
         self.view_tracks = filtered
         self._render_track_list()
 
+    def _schedule_filter(self) -> None:
+        self._search_timer.start()
+
     def _render_track_list(self) -> None:
         self.track_list.clear()
         tracks = self._sorted_tracks(self.view_tracks)
@@ -1502,16 +1546,19 @@ class PremiumMusicPlayer(QMainWindow):
                 meta_parts.append(t.artist)
             if t.album:
                 meta_parts.append(t.album)
-            if t.duration_ms > 0:
-                meta_parts.append(format_time(t.duration_ms))
             meta_text = " • ".join(meta_parts) if meta_parts else os.path.basename(t.path)
             row = TrackListRow(
                 i,
                 self._highlight_match(t.display_name, q),
                 meta_text,
+                format_time(t.duration_ms) if t.duration_ms > 0 else "--:--",
                 self._is_liked(t.path),
                 on_like_clicked=lambda _=False, p=t.path: self._toggle_like(p),
             )
+            if self._current_track is not None and self._current_track.path == t.path:
+                row.set_active(True)
+                row.index_label.setText("▶")
+                row.index_label.setStyleSheet("color: rgba(29,185,84,0.96); font-weight: 700;")
             self.track_list.setItemWidget(item, row)
 
         # Keep selection in sync
@@ -1555,6 +1602,11 @@ class PremiumMusicPlayer(QMainWindow):
                 self.track_list.setCurrentItem(item)
                 self.track_list.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
                 self._last_highlighted_path = current_path
+                row = self.track_list.itemWidget(item)
+                if isinstance(row, TrackListRow):
+                    row.set_active(True)
+                    row.index_label.setText("▶")
+                    row.index_label.setStyleSheet("color: rgba(29,185,84,0.96); font-weight: 700;")
                 return
 
         # If current track isn't in this view (e.g. queue contains it), do nothing.
@@ -1648,6 +1700,8 @@ class PremiumMusicPlayer(QMainWindow):
         if not self.queue:
             empty = QListWidgetItem("🎧 Your queue is empty\nStart adding songs")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setForeground(QColor(243, 243, 245, 140))
             self.queue_list.addItem(empty)
             return
         for t in self.queue:
@@ -1667,24 +1721,29 @@ class PremiumMusicPlayer(QMainWindow):
         track = self._track_by_path(path)
         if not track:
             return
-        # Spotify-ish: selecting a song plays it immediately, queue starts fresh.
-        self.queue.clear()
-        self.current_queue_track_path = None
-        self._render_queue_list()
-        self._save_queue()
+        # Play From Here: selected + remaining tracks in current view become queue.
+        ordered = self._sorted_tracks(self.view_tracks)
+        idx = next((i for i, t in enumerate(ordered) if t.path == track.path), -1)
+        if idx >= 0:
+            self.queue = ordered[idx:]
+            self.current_queue_track_path = None
+            self._render_queue_list()
+            self._save_queue()
+            self.play_queue_at(0)
+            return
         self._play_track(track, add_to_history=True, from_queue=False)
 
     def toggle_play(self) -> None:
         if self.player.is_playing():
             self.player.pause()
-            self.play.setText("▶")
+            self._set_play_button_text("▶")
         else:
             # If nothing has been loaded yet, attempt to play last known track.
             if self._current_track is None and self.view_tracks:
                 self._play_track(self.view_tracks[0], add_to_history=True, from_queue=False)
             else:
                 self.player.play()
-            self.play.setText("⏸")
+            self._set_play_button_text("⏸")
 
     def _on_seek_start(self) -> None:
         self._user_seeking = True
@@ -1913,7 +1972,8 @@ class PremiumMusicPlayer(QMainWindow):
         media = vlc.Media(track.path)
         self.player.set_media(media)
         self.player.play()
-        self.play.setText("⏸")
+        self._set_play_button_text("⏸")
+        self.setWindowTitle(f"{track.title} • Kush's Music")
 
         # Update meta
         self.title.setText(track.title)
@@ -1941,6 +2001,31 @@ class PremiumMusicPlayer(QMainWindow):
         self._push_recent(track.path)
         self._save_state(track.path, 0, was_playing=True)
 
+    def _set_play_button_text(self, text: str) -> None:
+        eff = self.play.graphicsEffect()
+        if not isinstance(eff, QGraphicsOpacityEffect):
+            eff = QGraphicsOpacityEffect(self.play)
+            self.play.setGraphicsEffect(eff)
+            eff.setOpacity(1.0)
+        fade_out = QPropertyAnimation(eff, b"opacity", self)
+        fade_out.setDuration(90)
+        fade_out.setStartValue(float(eff.opacity()))
+        fade_out.setEndValue(0.2)
+
+        def _swap():
+            self.play.setText(text)
+
+        fade_in = QPropertyAnimation(eff, b"opacity", self)
+        fade_in.setDuration(110)
+        fade_in.setStartValue(0.2)
+        fade_in.setEndValue(1.0)
+        fade_out.finished.connect(_swap)
+        seq = QSequentialAnimationGroup(self)
+        seq.addAnimation(fade_out)
+        seq.addAnimation(fade_in)
+        self._transition_anim = seq
+        seq.start()
+
     def _set_volume(self, value: int) -> None:
         self.volume_slider.setToolTip(f"{int(value)}%")
         try:
@@ -1964,7 +2049,16 @@ class PremiumMusicPlayer(QMainWindow):
         QShortcut(QKeySequence("Right"), self, activated=lambda: self._seek_rel(5000))
 
     def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            if self.search.text():
+                self.search.clear()
+                event.accept()
+                return
         if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier and self.queue_list.hasFocus():
+                self._move_selected_queue_item(-1 if event.key() == Qt.Key.Key_Up else 1)
+                event.accept()
+                return
             if self.track_list.count() > 0:
                 row = self.track_list.currentRow()
                 if row < 0:
@@ -1981,7 +2075,25 @@ class PremiumMusicPlayer(QMainWindow):
                 self.play_selected(item)
                 event.accept()
                 return
+        if event.key() == Qt.Key.Key_Delete:
+            if self.queue_list.hasFocus():
+                self.remove_selected_queue_item()
+                event.accept()
+                return
         super().keyPressEvent(event)
+
+    def _move_selected_queue_item(self, delta: int) -> None:
+        item = self.queue_list.currentItem()
+        if not item:
+            return
+        idx = self.queue_list.row(item)
+        new_idx = idx + delta
+        if idx < 0 or new_idx < 0 or new_idx >= len(self.queue):
+            return
+        self.queue[idx], self.queue[new_idx] = self.queue[new_idx], self.queue[idx]
+        self._render_queue_list()
+        self.queue_list.setCurrentRow(new_idx)
+        self._save_queue()
 
     def closeEvent(self, event) -> None:
         if self._current_track is not None:
@@ -2057,6 +2169,10 @@ class PremiumMusicPlayer(QMainWindow):
 
 def run() -> None:
     app = QApplication(sys.argv)
+    QApplication.setStyle("Fusion")
+    app_font = QFont("Inter, Segoe UI, Roboto, sans-serif", 10)
+    app_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    app.setFont(app_font)
     app.setApplicationName("kush-music-player")
     app.setDesktopFileName("kush-music-player")
     if os.path.exists(ICON_PATH):
