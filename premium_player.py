@@ -4,10 +4,24 @@ import json
 import math
 import os
 import random
+import re
 import sys
 from html import escape
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+
+def clean_display_title(text: str, artist: str = "") -> str:
+    if not text:
+        return ""
+    text = re.sub(r'(?i)\.mp3$', '', text)
+    text = re.sub(r'(?i)[\[(]\s*(official\s+video|official\s+lyrical\s+video|official\s+audio|lyrics|lyric\s+video|visualizer)\s*[\])]', '', text)
+    if artist:
+        m1 = re.match(r'(?i)^\s*' + re.escape(artist) + r'\s*-\s*(.*)$', text)
+        if m1: text = m1.group(1)
+        m2 = re.match(r'(?i)^(.*?)\s*-\s*' + re.escape(artist) + r'\s*$', text)
+        if m2: text = m2.group(1)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip(" -")
 
 import vlc
 from mutagen import File as MutagenFile
@@ -25,7 +39,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -317,13 +331,58 @@ class MiniPlayer(QWidget):
             pass
 
 
+class ElidedLabel(QLabel):
+    def __init__(self, raw_text: str = "", query: str = ""):
+        super().__init__(raw_text)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(10)
+        self._raw_text = raw_text
+        self._query = query
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_text()
+
+    def _update_text(self):
+        if not self._raw_text:
+            self.setText("")
+            return
+        fm = QFontMetrics(self.font())
+        elided = fm.elidedText(self._raw_text, Qt.TextElideMode.ElideRight, max(0, self.width() - 2))
+        base = escape(elided)
+        if not self._query:
+            self.setText(base)
+            return
+            
+        low = elided.lower()
+        q = self._query.lower()
+        i = low.find(q)
+        if i < 0:
+            self.setText(base)
+            return
+            
+        before = escape(elided[:i])
+        mid = escape(elided[i : i + len(self._query)])
+        after = escape(elided[i + len(self._query) :])
+        self.setText(f"{before}<span style='color:#1db954;font-weight:700;'>{mid}</span>{after}")
+
+
 class TrackListRow(QWidget):
-    def __init__(self, index: int, title_html: str, meta_text: str, duration_text: str, liked: bool, on_like_clicked):
+    def __init__(self, index: int, title_text: str, search_query: str, meta_text: str, duration_text: str, liked: bool, thumb_pixmap: Optional[QPixmap], on_like_clicked):
         super().__init__()
         self._base_index_text = f"{index}."
         self.index_label = QLabel(self._base_index_text)
-        self.index_label.setFixedWidth(26)
-        self.index_label.setStyleSheet("color: #A0A0A0; font-weight: 600; font-size: 12px;")
+        self.index_label.setFixedWidth(40)
+        self.index_label.setStyleSheet("color: rgba(255,255,255,0.4); font-weight: 500; font-size: 15px;")
+
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(40, 40)
+        self.thumb.setScaledContents(True)
+        self.thumb.setStyleSheet("border-radius: 6px; background: rgba(255,255,255,0.06);")
+        if thumb_pixmap is not None:
+            self.thumb.setPixmap(thumb_pixmap)
+        else:
+            self.thumb.setText("")
 
         self.like_btn = QPushButton("♥" if liked else "♡")
         self.like_btn.setObjectName("trackLikeBtn")
@@ -332,78 +391,71 @@ class TrackListRow(QWidget):
 
         self.like_opacity = QGraphicsOpacityEffect(self.like_btn)
         self.like_btn.setGraphicsEffect(self.like_opacity)
-        self.like_opacity.setOpacity(0.0)
+        self.like_opacity.setOpacity(1.0 if liked else 0.0)
+        self._was_liked = liked
 
         self.like_anim = QPropertyAnimation(self.like_opacity, b"opacity", self)
         self.like_anim.setDuration(140)
         self.like_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        self.text_label = QLabel(title_html)
+        self.text_label = ElidedLabel(title_text, search_query)
         self.text_label.setTextFormat(Qt.TextFormat.RichText)
-        self.text_label.setStyleSheet("color: #EDEDED; font-weight: 600; font-size: 14px;")
+        self.text_label.setStyleSheet("color: #F3F4F6; font-weight: 600; font-size: 16px; letter-spacing: 0.2px;")
         self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        
         self.meta_label = QLabel(meta_text)
-        self.meta_label.setStyleSheet("color: #A0A0A0; font-size: 12px; font-weight: 400;")
+        self.meta_label.setStyleSheet("color: #9CA3AF; font-size: 14px; font-weight: 400; letter-spacing: 0.2px;")
         self.meta_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        
         self.duration_label = QLabel(duration_text)
-        self.duration_label.setStyleSheet("color: #6B7280; font-size: 11px; font-weight: 400;")
+        self.duration_label.setStyleSheet("color: #6B7280; font-weight: 500; font-size: 13px;")
         self.duration_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.duration_label.setMinimumWidth(46)
+        self.duration_label.setFixedWidth(55)
+        
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(2)
+        text_col.setSpacing(4)
         text_col.addWidget(self.text_label)
         text_col.addWidget(self.meta_label)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
         layout.addWidget(self.index_label, 0)
+        layout.addWidget(self.thumb, 0)
         layout.addLayout(text_col, 1)
         layout.addWidget(self.duration_label, 0)
         layout.addWidget(self.like_btn, 0)
-        self.setMinimumHeight(40)
-        self._hover_alpha = 0.0
+        self.setMinimumHeight(64)
+        self.setMaximumHeight(64)
+        self.meta_label.setMaximumHeight(20)
         self._is_active = False
 
     def enterEvent(self, event):
-        self.index_label.setText("▶")
-        self.index_label.setStyleSheet("color: #22c55e; font-weight: 700; font-size: 12px;")
         self.like_anim.stop()
         self.like_anim.setStartValue(self.like_opacity.opacity())
         self.like_anim.setEndValue(1.0)
         self.like_anim.start()
-        self._hover_alpha = 1.0
-        self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self.index_label.setText(self._base_index_text)
-        self.index_label.setStyleSheet("color: #A0A0A0; font-weight: 600; font-size: 12px;")
         self.like_anim.stop()
         self.like_anim.setStartValue(self.like_opacity.opacity())
-        self.like_anim.setEndValue(0.0)
+        self.like_anim.setEndValue(1.0 if self._was_liked else 0.0)
         self.like_anim.start()
-        self._hover_alpha = 0.0
-        self.update()
         super().leaveEvent(event)
 
     def set_active(self, active: bool) -> None:
         self._is_active = active
+        if active:
+            self.index_label.setText("▶")
+            self.index_label.setStyleSheet("color: #22c55e; font-weight: 700; font-size: 15px;")
+            self.text_label.setStyleSheet("color: #22c55e; font-weight: 600; font-size: 16px; letter-spacing: 0.2px;")
+        else:
+            self.index_label.setText(self._base_index_text)
+            self.index_label.setStyleSheet("color: rgba(255,255,255,0.4); font-weight: 500; font-size: 15px;")
+            self.text_label.setStyleSheet("color: #F3F4F6; font-weight: 600; font-size: 16px; letter-spacing: 0.2px;")
         self.update()
-
-    def paintEvent(self, event) -> None:
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self._hover_alpha > 0:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(255, 255, 255, int(16 * self._hover_alpha)))
-            p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 10, 10)
-        if self._is_active:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(34, 197, 94, 230))
-            p.drawRoundedRect(2, 4, 4, max(8, self.height() - 8), 2, 2)
-        super().paintEvent(event)
 
 
 class WaveformWidget(QWidget):
@@ -741,6 +793,32 @@ class PremiumMusicPlayer(QMainWindow):
         self.track_list.setSpacing(4)
         self.track_list.setToolTip("Double-click to play")
 
+        header_bar = QWidget()
+        header_bar.setObjectName("trackHeader")
+        header_bar_layout = QHBoxLayout(header_bar)
+        header_bar_layout.setContentsMargins(12, 4, 12, 4)
+        header_bar_layout.setSpacing(8)
+
+        col_num = QLabel("#")
+        col_num.setFixedWidth(40)
+        col_title = QLabel("TITLE")
+        col_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        col_duration = QLabel("⏱")
+        col_duration.setFixedWidth(55)
+        col_duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        col_like = QLabel("")
+        col_like.setFixedWidth(28)
+
+        for lbl in (col_num, col_title, col_duration, col_like):
+            lbl.setStyleSheet("color: rgba(255,255,255,0.35); font-size: 11px; font-weight: 700; letter-spacing: 1.2px;")
+            header_bar_layout.addWidget(lbl)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet("color: rgba(255,255,255,0.08); background: rgba(255,255,255,0.08); max-height: 1px;")
+
+        main_layout.addWidget(header_bar)
+        main_layout.addWidget(divider)
         main_layout.addWidget(self.track_list, 2)
         self.status_label = QLabel("")
         self.status_label.setObjectName("timeLabel")
@@ -749,14 +827,15 @@ class PremiumMusicPlayer(QMainWindow):
 
         # Progress / seeking + time
         progRow = QHBoxLayout()
-        progRow.setContentsMargins(0, 0, 0, 0)
+        left_offset = now_layout.contentsMargins().left() + 250 + now_layout.spacing()
+        progRow.setContentsMargins(left_offset, 0, now_layout.contentsMargins().right(), 0)
         progRow.setSpacing(10)
         self.elapsed = QLabel("0:00")
         self.elapsed.setObjectName("timeLabel")
         self.total = QLabel("0:00")
         self.total.setObjectName("timeLabel")
         self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setObjectName("progress")
+        self.slider.setObjectName("progressSolid")
         self.slider.setRange(0, 0)
 
         self._user_seeking = False
@@ -848,6 +927,7 @@ class PremiumMusicPlayer(QMainWindow):
                 border-radius: 14px;
                 padding: 8px 14px;
                 font-weight: 600;
+                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: rgba(29,185,84,0.18);
@@ -906,31 +986,31 @@ class PremiumMusicPlayer(QMainWindow):
                 background: transparent;
                 border: none;
                 color: #EDEDED;
-                font-size: 13px;
+                font-size: 14px;
                 outline: none;
+                spacing: 2px;
             }
             QListWidget#listGlass::item {
-                padding: 10px 10px;
-                border-radius: 12px;
-                margin: 1px 0px;
+                padding: 2px 0px;
+                border-radius: 10px;
             }
             QListWidget#listGlass::item:hover {
-                background: rgba(255,255,255,0.06);
+                background: rgba(255,255,255,0.07);
+                border-radius: 10px;
             }
             QListWidget#listGlass::item:selected {
-                background: rgba(34, 197, 94, 0.15);
-                color: #EDEDED;
-                border-left: 4px solid #22c55e;
+                background: rgba(29,185,84,0.18);
+                border: 1px solid rgba(29,185,84,0.30);
             }
 
             QLabel#trackTitle {
                 color: #EDEDED;
-                font-size: 17px;
+                font-size: 20px;
                 font-weight: 600;
             }
             QLabel#trackArtist {
                 color: #A0A0A0;
-                font-size: 13px;
+                font-size: 15px;
                 font-weight: 400;
             }
             QLabel#trackSub {
@@ -1019,26 +1099,49 @@ class PremiumMusicPlayer(QMainWindow):
             }
 
             QSlider#progress::groove:horizontal {
-                height: 8px;
+                height: 6px;
                 background: rgba(255,255,255,0.12);
-                border-radius: 5px;
+                border-radius: 3px;
             }
             QSlider#progress::sub-page:horizontal {
                 background: #1db954;
-                border-radius: 5px;
+                border-radius: 3px;
             }
             QSlider#progress::add-page:horizontal {
                 background: rgba(255,255,255,0.12);
-                border-radius: 5px;
+                border-radius: 3px;
             }
             QSlider#progress::handle:horizontal {
                 background: #1db954;
-                width: 18px;
-                margin: -6px 0;
-                border-radius: 9px;
+                width: 14px;
+                margin: -4px 0;
+                border-radius: 7px;
             }
             QSlider#progress:hover::groove:horizontal {
                 background: rgba(255,255,255,0.20);
+            }
+
+            QSlider#progressSolid::groove:horizontal {
+                height: 2px;
+                background: #2A2A2A;
+                border-radius: 1px;
+            }
+            QSlider#progressSolid::sub-page:horizontal {
+                background: #22c55e;
+                border-radius: 1px;
+            }
+            QSlider#progressSolid::handle:horizontal {
+                background: #22c55e;
+                width: 8px;
+                height: 8px;
+                margin: -3px 0;
+                border-radius: 4px;
+            }
+            QSlider#progressSolid:hover::handle:horizontal {
+                width: 10px;
+                height: 10px;
+                margin: -4px -1px;
+                border-radius: 5px;
             }
 
             QScrollBar:vertical {
@@ -1063,14 +1166,14 @@ class PremiumMusicPlayer(QMainWindow):
 
             QLabel#timeLabel {
                 color: #A0A0A0;
-                font-size: 12px;
+                font-size: 14px;
                 font-weight: 500;
                 min-width: 42px;
             }
 
             QLabel#queueTitle {
                 color: #EDEDED;
-                font-size: 14px;
+                font-size: 16px;
                 font-weight: 600;
             }
 
@@ -1538,27 +1641,32 @@ class PremiumMusicPlayer(QMainWindow):
         q = self.search.text().strip()
         for i, t in enumerate(tracks, start=1):
             item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 68))
             item.setData(Qt.ItemDataRole.UserRole, t.path)
             item.setToolTip(f"{t.title}\n{t.artist}\n{t.album}\nDouble-click to play")
             self.track_list.addItem(item)
-            meta_parts = []
-            if t.artist:
-                meta_parts.append(t.artist)
-            if t.album:
-                meta_parts.append(t.album)
-            meta_text = " • ".join(meta_parts) if meta_parts else os.path.basename(t.path)
+            meta_text = escape(t.artist) if t.artist else ""
+            cleaned_title = clean_display_title(t.title, t.artist)
+            
+            thumb_pix = self._art_cache.get(t.path)
+            if thumb_pix is None:
+                raw = read_art_pixmap(t.path, size=40)
+                if raw is not None:
+                    thumb_pix = raw.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                    self._art_cache[t.path] = thumb_pix
+            
             row = TrackListRow(
                 i,
-                self._highlight_match(t.display_name, q),
+                cleaned_title,
+                q,
                 meta_text,
                 format_time(t.duration_ms) if t.duration_ms > 0 else "--:--",
                 self._is_liked(t.path),
+                thumb_pixmap=thumb_pix,
                 on_like_clicked=lambda _=False, p=t.path: self._toggle_like(p),
             )
             if self._current_track is not None and self._current_track.path == t.path:
                 row.set_active(True)
-                row.index_label.setText("▶")
-                row.index_label.setStyleSheet("color: rgba(29,185,84,0.96); font-weight: 700;")
             self.track_list.setItemWidget(item, row)
 
         # Keep selection in sync
@@ -1596,18 +1704,24 @@ class PremiumMusicPlayer(QMainWindow):
         current_path = self._current_track.path
         if self._last_highlighted_path == current_path:
             return
+        
         for i in range(self.track_list.count()):
             item = self.track_list.item(i)
+            # Remove active state from previous
+            if self._last_highlighted_path and item.data(Qt.ItemDataRole.UserRole) == self._last_highlighted_path:
+                row = self.track_list.itemWidget(item)
+                if isinstance(row, TrackListRow):
+                    row.set_active(False)
+            
+            # Add active state to new current track
             if item.data(Qt.ItemDataRole.UserRole) == current_path:
                 self.track_list.setCurrentItem(item)
                 self.track_list.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                self._last_highlighted_path = current_path
                 row = self.track_list.itemWidget(item)
                 if isinstance(row, TrackListRow):
                     row.set_active(True)
-                    row.index_label.setText("▶")
-                    row.index_label.setStyleSheet("color: rgba(29,185,84,0.96); font-weight: 700;")
-                return
+                    
+        self._last_highlighted_path = current_path
 
         # If current track isn't in this view (e.g. queue contains it), do nothing.
 
@@ -2170,7 +2284,7 @@ class PremiumMusicPlayer(QMainWindow):
 def run() -> None:
     app = QApplication(sys.argv)
     QApplication.setStyle("Fusion")
-    app_font = QFont("Inter, Segoe UI, Roboto, sans-serif", 10)
+    app_font = QFont("Inter, Segoe UI, SF Pro Display, Roboto, sans-serif", 10)
     app_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(app_font)
     app.setApplicationName("kush-music-player")
