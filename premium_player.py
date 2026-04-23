@@ -379,10 +379,16 @@ class TrackListRow(QWidget):
         self.thumb.setFixedSize(40, 40)
         self.thumb.setScaledContents(True)
         self.thumb.setStyleSheet("border-radius: 6px; background: rgba(255,255,255,0.06);")
-        if thumb_pixmap is not None:
+        if thumb_pixmap is not None and not thumb_pixmap.isNull():
             self.thumb.setPixmap(thumb_pixmap)
+            self.thumb.setStyleSheet("border-radius: 6px; background: transparent;")
         else:
-            self.thumb.setText("")
+            self.thumb.setText("♫")
+            self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.thumb.setStyleSheet(
+                "border-radius: 6px; background: rgba(29,185,84,0.12); "
+                "color: rgba(29,185,84,0.6); font-size: 16px; border: 1px solid rgba(29,185,84,0.15);"
+            )
 
         self.like_btn = QPushButton("♥" if liked else "♡")
         self.like_btn.setObjectName("trackLikeBtn")
@@ -430,8 +436,11 @@ class TrackListRow(QWidget):
         self.setMaximumHeight(64)
         self.meta_label.setMaximumHeight(20)
         self._is_active = False
-
+        self._hovered = False
+    
     def enterEvent(self, event):
+        self._hovered = True
+        self.update()
         self.like_anim.stop()
         self.like_anim.setStartValue(self.like_opacity.opacity())
         self.like_anim.setEndValue(1.0)
@@ -439,24 +448,38 @@ class TrackListRow(QWidget):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
         self.like_anim.stop()
         self.like_anim.setStartValue(self.like_opacity.opacity())
         self.like_anim.setEndValue(1.0 if self._was_liked else 0.0)
         self.like_anim.start()
         super().leaveEvent(event)
 
+    def paintEvent(self, event):
+        if self._hovered and not self._is_active:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(QColor(255, 255, 255, 13))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(self.rect(), 8, 8)
+            painter.end()
+        super().paintEvent(event)
     def set_active(self, active: bool) -> None:
         self._is_active = active
         if active:
             self.index_label.setText("▶")
-            self.index_label.setStyleSheet("color: #22c55e; font-weight: 700; font-size: 15px;")
-            self.text_label.setStyleSheet("color: #22c55e; font-weight: 600; font-size: 16px; letter-spacing: 0.2px;")
+            self.index_label.setStyleSheet("color: #1db954; font-weight: 700; font-size: 15px; background: transparent;")
+            self.text_label.setStyleSheet("color: #1db954; font-weight: 700; font-size: 16px; letter-spacing: 0.2px; background: transparent;")
+            self.meta_label.setStyleSheet("color: rgba(29,185,84,0.7); font-size: 14px; font-weight: 400; background: transparent;")
+            self.setStyleSheet("background: transparent;")
         else:
             self.index_label.setText(self._base_index_text)
-            self.index_label.setStyleSheet("color: rgba(255,255,255,0.4); font-weight: 500; font-size: 15px;")
-            self.text_label.setStyleSheet("color: #F3F4F6; font-weight: 600; font-size: 16px; letter-spacing: 0.2px;")
+            self.index_label.setStyleSheet("color: rgba(255,255,255,0.4); font-weight: 500; font-size: 15px; background: transparent;")
+            self.text_label.setStyleSheet("color: #F3F4F6; font-weight: 600; font-size: 16px; letter-spacing: 0.2px; background: transparent;")
+            self.meta_label.setStyleSheet("color: #9CA3AF; font-size: 14px; font-weight: 400; background: transparent;")
+            self.setStyleSheet("background: transparent;")
         self.update()
-
 
 class WaveformWidget(QWidget):
     def __init__(self):
@@ -674,9 +697,10 @@ class PremiumMusicPlayer(QMainWindow):
         self.art_wrap.setObjectName("artWrap")
         art_wrap_layout = QVBoxLayout(self.art_wrap)
         art_wrap_layout.setContentsMargins(0, 0, 0, 0)
-        self.art = QLabel("No Art")
+        self.art = QLabel()
         self.art.setObjectName("art")
-        self.art.setFixedSize(250, 250)
+        self.art.setFixedSize(220, 220)
+        self.art.setScaledContents(True)
         self.art.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.art.setStyleSheet("color: rgba(255,255,255,0.62); font-weight: 650;")
         art_wrap_layout.addWidget(self.art)
@@ -695,8 +719,12 @@ class PremiumMusicPlayer(QMainWindow):
         meta.setSpacing(10)
         self.title = QLabel("Nothing Playing")
         self.title.setObjectName("trackTitle")
+        self.title.setWordWrap(True)
+        self.title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.artist = QLabel("")
         self.artist.setObjectName("trackArtist")
+        self.artist.setWordWrap(False)
+        self.artist.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.subtitle = QLabel("Pick a song to start. Use right-click to add to Queue / Playlist.")
         self.subtitle.setObjectName("trackSub")
         self.subtitle.setWordWrap(True)
@@ -767,7 +795,8 @@ class PremiumMusicPlayer(QMainWindow):
 
         meta.addLayout(self.play_controls)
 
-        now_layout.addWidget(self.art_wrap)
+        self.art_wrap.setFixedSize(220, 220)
+        now_layout.addWidget(self.art_wrap, 0)
         now_layout.addLayout(meta, 1)
 
         main_layout.addWidget(now)
@@ -789,9 +818,12 @@ class PremiumMusicPlayer(QMainWindow):
         self.track_list.itemDoubleClicked.connect(self.play_selected)
         self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.track_list.customContextMenuRequested.connect(self._track_context_menu)
-        self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.track_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.track_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.track_list.setStyleSheet(self.track_list.styleSheet())
+        self.track_list.itemClicked.connect(lambda _: self.track_list.clearSelection())
         self.track_list.setSpacing(4)
-        self.track_list.setToolTip("Double-click to play")
+        self.track_list.setToolTip("")
 
         header_bar = QWidget()
         header_bar.setObjectName("trackHeader")
@@ -863,7 +895,7 @@ class PremiumMusicPlayer(QMainWindow):
         queue_layout.addWidget(self.queue_title)
 
         self.queue_list = QListWidget()
-        self.queue_list.setObjectName("listGlass")
+        self.queue_list.setObjectName("queueList")
         self.queue_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.queue_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.queue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -909,9 +941,14 @@ class PremiumMusicPlayer(QMainWindow):
             QWidget#root {
                 background: transparent;
             }
-            QFrame#sidebar, QFrame#main, QFrame#queuePanel {
+            QFrame#sidebar, QFrame#main {
                 background: rgba(18,18,24,220);
                 border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 18px;
+            }
+            QFrame#queuePanel {
+                background: rgba(14,14,20,230);
+                border: 1px solid rgba(255,255,255,0.08);
                 border-radius: 18px;
             }
             QFrame#main { padding: 0px; }
@@ -985,22 +1022,41 @@ class PremiumMusicPlayer(QMainWindow):
             QListWidget#listGlass {
                 background: transparent;
                 border: none;
-                color: #EDEDED;
-                font-size: 14px;
                 outline: none;
-                spacing: 2px;
+                font-size: 14px;
+                color: #e0e0e0;
             }
             QListWidget#listGlass::item {
-                padding: 2px 0px;
-                border-radius: 10px;
-            }
-            QListWidget#listGlass::item:hover {
-                background: rgba(255,255,255,0.07);
-                border-radius: 10px;
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
             }
             QListWidget#listGlass::item:selected {
-                background: rgba(29,185,84,0.18);
-                border: 1px solid rgba(29,185,84,0.30);
+                background: transparent;
+                border: none;
+                outline: none;
+            }
+            QListWidget#listGlass::item:hover {
+                background: transparent;
+                border: none;
+            }
+            QListWidget#listGlass::item:focus {
+                background: transparent;
+                border: none;
+                outline: none;
+            }
+            QListWidget#listGlass::item:selected:active {
+                background: transparent;
+                border: none;
+            }
+            QListWidget#listGlass::item:selected:!active {
+                background: transparent;
+                border: none;
+            }
+            QListWidget#listGlass:focus {
+                outline: none;
+                border: none;
             }
 
             QLabel#trackTitle {
@@ -1172,15 +1228,44 @@ class PremiumMusicPlayer(QMainWindow):
             }
 
             QLabel#queueTitle {
-                color: #EDEDED;
+                color: #ffffff;
                 font-size: 16px;
-                font-weight: 600;
+                font-weight: 700;
+                letter-spacing: 0.2px;
+                padding-bottom: 4px;
+            }
+            
+            QListWidget#queueList {
+                background: transparent;
+                border: none;
+                outline: none;
+                font-size: 14px;
+                color: #e0e0e0;
+            }
+            QListWidget#queueList::item {
+                padding: 8px 6px;
+                border-radius: 8px;
+                border-bottom: 1px solid rgba(255,255,255,0.04);
+                color: #d0d0d0;
+                font-size: 13px;
+            }
+            QListWidget#queueList::item:selected {
+                background: rgba(29,185,84,0.15);
+                color: #1db954;
+                border: 1px solid rgba(29,185,84,0.25);
+            }
+            QListWidget#queueList::item:hover {
+                background: rgba(255,255,255,0.06);
             }
 
             QLabel#art {
-                border-radius: 18px;
+                border-radius: 14px;
                 background: rgba(255,255,255,0.05);
-                border: 1px solid rgba(255,255,255,0.12);
+                border: 1px solid rgba(255,255,255,0.10);
+                min-width: 220px;
+                min-height: 220px;
+                max-width: 220px;
+                max-height: 220px;
             }
             QFrame#artWrap {
                 background: transparent;
@@ -1402,8 +1487,14 @@ class PremiumMusicPlayer(QMainWindow):
         self.player.pause()
         QTimer.singleShot(120, lambda: self.player.set_time(self._last_state_position))
         self.title.setText(track.title)
+        self.title.setWordWrap(True)
+        self.title.setMaximumWidth(600)
         self.artist.setText(track.artist)
+        self.artist.setWordWrap(False)
         self.subtitle.setText(track.album or "")
+        self.title_fade.setOpacity(1.0)
+        self.artist_fade.setOpacity(1.0)
+        self.subtitle_fade.setOpacity(1.0)
         self.elapsed.setText(format_time(self._last_state_position))
         self.slider.setValue(self._last_state_position)
         self.play.setText("▶")
@@ -1413,11 +1504,13 @@ class PremiumMusicPlayer(QMainWindow):
             if pix is not None:
                 self._art_cache[track.path] = pix
         if pix:
-            self.art.setPixmap(pix)
+            self.art.setFixedSize(220, 220)
+            self.art.setPixmap(pix.scaled(220, 220, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
             self.art.setText("")
         else:
-            self.art.setPixmap(QPixmap())
-            self.art.setText("No Art")
+            self.art.setFixedSize(220, 220)
+            self.art.setPixmap(self._make_placeholder_art(220))
+            self.art.setText("")
         self._sync_highlight_to_current_track()
         self._update_now_like_button()
         if self._last_state_was_playing:
@@ -1643,17 +1736,19 @@ class PremiumMusicPlayer(QMainWindow):
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, 68))
             item.setData(Qt.ItemDataRole.UserRole, t.path)
-            item.setToolTip(f"{t.title}\n{t.artist}\n{t.album}\nDouble-click to play")
+            item.setToolTip("")
             self.track_list.addItem(item)
             meta_text = escape(t.artist) if t.artist else ""
             cleaned_title = clean_display_title(t.title, t.artist)
             
-            thumb_pix = self._art_cache.get(t.path)
+            thumb_pix = self._art_cache.get(t.path + "_thumb")
             if thumb_pix is None:
-                raw = read_art_pixmap(t.path, size=40)
+                raw = read_art_pixmap(t.path, size=48)
                 if raw is not None:
                     thumb_pix = raw.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-                    self._art_cache[t.path] = thumb_pix
+                else:
+                    thumb_pix = None
+                self._art_cache[t.path + "_thumb"] = thumb_pix if thumb_pix is not None else QPixmap()
             
             row = TrackListRow(
                 i,
@@ -1831,6 +1926,7 @@ class PremiumMusicPlayer(QMainWindow):
             self.queue_list.addItem(item)
 
     def play_selected(self, item: QListWidgetItem) -> None:
+        self.track_list.clearSelection()
         path = item.data(Qt.ItemDataRole.UserRole)
         track = self._track_by_path(path)
         if not track:
@@ -2015,7 +2111,22 @@ class PremiumMusicPlayer(QMainWindow):
                 ordered.append(track)
         self.queue = ordered
         self._save_queue()
-
+    
+    def _make_placeholder_art(self, size: int = 220) -> QPixmap:
+        pix = QPixmap(size, size)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor(28, 28, 38))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(0, 0, size, size, 20, 20)
+        font = QFont("Arial", size // 3)
+        painter.setFont(font)
+        painter.setPen(QColor(29, 185, 84, 160))
+        painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "♫")
+        painter.end()
+        return pix
+    
     def _fade_to_new_track(self, new_track: Track, from_queue: bool) -> None:
         # Fade art card quickly for smooth premium transitions.
         self.subtitle.setText("Loading…")
@@ -2101,13 +2212,12 @@ class PremiumMusicPlayer(QMainWindow):
             if pix is not None:
                 self._art_cache[track.path] = pix
         if pix:
-            self.art.setFixedSize(238, 238)
+            self.art.setFixedSize(220, 220)
             self.art.setPixmap(pix)
             self.art.setText("")
-            QTimer.singleShot(120, lambda: self.art.setFixedSize(250, 250))
         else:
-            self.art.setPixmap(QPixmap())
-            self.art.setText("No Art")
+            self.art.setPixmap(self._make_placeholder_art(250))
+            self.art.setText("")
 
         # Ensure track highlight is in sync.
         self._sync_highlight_to_current_track()
