@@ -582,6 +582,12 @@ class PremiumMusicPlayer(QMainWindow):
         # ----- UI -----
         self._build_ui()
         self._load_settings()
+        if hasattr(self, "shuffle_btn"):
+            on = bool(self.settings.get("shuffle", False))
+            self.shuffle_btn.setText("🔀 Shuffle: ON" if on else "🔀 Shuffle: OFF")
+        if hasattr(self, "repeat_btn"):
+            on = bool(self.settings.get("repeat", False))
+            self.repeat_btn.setText("🔂 Repeat: ON" if on else "🔂 Repeat: OFF")
         self._load_playlists()
         self._load_music()
         self._load_stats()
@@ -782,6 +788,14 @@ class PremiumMusicPlayer(QMainWindow):
         self.autoplay_btn.setObjectName("ghostBtnSmall")
         self.autoplay_btn.clicked.connect(self._toggle_autoplay)
         self.play_controls.addWidget(self.autoplay_btn)
+        self.shuffle_btn = QPushButton("🔀 Shuffle: OFF")
+        self.shuffle_btn.setObjectName("ghostBtnSmall")
+        self.shuffle_btn.clicked.connect(self._toggle_shuffle)
+        self.play_controls.addWidget(self.shuffle_btn)
+        self.repeat_btn = QPushButton("🔂 Repeat: OFF")
+        self.repeat_btn.setObjectName("ghostBtnSmall")
+        self.repeat_btn.clicked.connect(self._toggle_repeat)
+        self.play_controls.addWidget(self.repeat_btn)
         self.volume_label = QLabel("Vol")
         self.volume_label.setObjectName("timeLabel")
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
@@ -795,8 +809,8 @@ class PremiumMusicPlayer(QMainWindow):
 
         meta.addLayout(self.play_controls)
 
-        self.art_wrap.setFixedSize(220, 220)
-        now_layout.addWidget(self.art_wrap, 0)
+        self.art_wrap.setFixedWidth(224)
+        now_layout.addWidget(self.art_wrap, 0, Qt.AlignmentFlag.AlignTop)
         now_layout.addLayout(meta, 1)
 
         main_layout.addWidget(now)
@@ -1060,9 +1074,11 @@ class PremiumMusicPlayer(QMainWindow):
             }
 
             QLabel#trackTitle {
-                color: #EDEDED;
-                font-size: 20px;
-                font-weight: 600;
+                color: #ffffff;
+                font-size: 18px;
+                font-weight: 700;
+                letter-spacing: 0.3px;
+                padding-right: 8px;
             }
             QLabel#trackArtist {
                 color: #A0A0A0;
@@ -1367,6 +1383,20 @@ class PremiumMusicPlayer(QMainWindow):
         self._save_settings()
         self._refresh_autoplay_button()
         self._show_status("Auto-play enabled" if not current else "Auto-play disabled")
+
+    def _toggle_shuffle(self) -> None:
+        current = bool(self.settings.get("shuffle", False))
+        self.settings["shuffle"] = not current
+        self._save_settings()
+        self.shuffle_btn.setText("🔀 Shuffle: ON" if not current else "🔀 Shuffle: OFF")
+        self._show_status("Shuffle enabled" if not current else "Shuffle disabled")
+
+    def _toggle_repeat(self) -> None:
+        current = bool(self.settings.get("repeat", False))
+        self.settings["repeat"] = not current
+        self._save_settings()
+        self.repeat_btn.setText("🔂 Repeat: ON" if not current else "🔂 Repeat: OFF")
+        self._show_status("Repeat enabled" if not current else "Repeat disabled")
 
     def _open_settings(self) -> None:
         dialog = QDialog(self)
@@ -1906,24 +1936,18 @@ class PremiumMusicPlayer(QMainWindow):
     def _render_queue_list(self) -> None:
         self.queue_list.clear()
         self.queue_title.setText(f"Queue ({len(self.queue)})")
-        if not self.queue:
-            empty = QListWidgetItem("🎧 Your queue is empty\nStart adding songs")
-            empty.setFlags(Qt.ItemFlag.NoItemFlags)
-            empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setForeground(QColor(243, 243, 245, 140))
-            self.queue_list.addItem(empty)
-            return
-        for t in self.queue:
-            label = t.display_name
-            is_current = self.current_queue_track_path == t.path
-            if is_current:
-                label = "▶ " + label
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, t.path)
-            item.setToolTip(t.path)
-            if is_current:
-                item.setBackground(QColor(29, 185, 84, 80))
+        for track in self.queue:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, track.path)
+            thumb = self._art_cache.get(track.path + "_thumb")
+            if thumb is not None and not thumb.isNull():
+                item.setIcon(QIcon(thumb))
+            display = f"{track.title}"
+            if track.artist:
+                display += f"\n{track.artist}"
+            item.setText(display)
             self.queue_list.addItem(item)
+        self.queue_list.setIconSize(QSize(36, 36))
 
     def play_selected(self, item: QListWidgetItem) -> None:
         self.track_list.clearSelection()
@@ -1991,6 +2015,11 @@ class PremiumMusicPlayer(QMainWindow):
                 self._play_track(self.view_tracks[cur_idx + 1], add_to_history=True, from_queue=False)
 
     def _smart_autoplay_next_track(self) -> Optional[Track]:
+        if bool(self.settings.get("shuffle", False)) and self.view_tracks:
+            candidates = [t for t in self.view_tracks if t != self._current_track]
+            if candidates:
+                return random.choice(candidates)
+
         if self._current_track is None:
             return None
         current_path = self._current_track.path
@@ -2377,6 +2406,12 @@ class PremiumMusicPlayer(QMainWindow):
             except Exception:
                 ended = False
             if ended or (length > 0 and pos >= max(0, length - 350)):
+                if bool(self.settings.get("repeat", False)) and self._current_track is not None:
+                    self._track_end_handled = True
+                    self.player.stop()
+                    self.player.set_media(vlc.Media(self._current_track.path))
+                    self.player.play()
+                    return
                 self._track_end_handled = True
                 if self.queue:
                     self.play_next()
