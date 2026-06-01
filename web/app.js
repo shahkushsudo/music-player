@@ -22,7 +22,7 @@ class MusicPlayer {
             lastFilename: null,
             lastTime: 0
         };
-
+    }
         this.audio.volume = this.session.volume;
         this.isShuffle = this.session.isShuffle;
         this.isRepeat = this.session.isRepeat;
@@ -107,11 +107,23 @@ class MusicPlayer {
             this.updatePlayerControls();
             this.showToast(this.isRepeat ? 'Repeat enabled' : 'Repeat disabled');
         });
-
         this.audio.addEventListener('timeupdate', () => this.updateSeekBar());
         this.audio.addEventListener('ended', () => this.handleSongEnd());
         this.audio.addEventListener('loadedmetadata', () => {
             this.el.totalTime.textContent = this.formatTime(this.audio.duration);
+            if (this.currentSong) {
+                this.currentSong.duration = this.audio.duration;
+            }
+        });
+        this.audio.addEventListener('play', () => {
+            this.isPlaying = true;
+            this.updatePlayerControls();
+            this.renderLibrary();
+        });
+        this.audio.addEventListener('pause', () => {
+            this.isPlaying = false;
+            this.updatePlayerControls();
+            this.renderLibrary();
         });
 
         this.el.seekBar.addEventListener('click', (e) => {
@@ -206,11 +218,12 @@ class MusicPlayer {
     async handleFilesAdded(fileList) {
         let addedCount = 0;
         for (let file of fileList) {
-            if (this.files.has(file.name)) continue;
-            this.files.set(file.name, file);
-
-            if (!this.globalMeta[file.name]) {
-                this.globalMeta[file.name] = { liked: false, playCount: 0, addedAt: Date.now() };
+            const fileKey = `${file.name}_${file.size}`;
+            if (this.files.has(fileKey)) continue;
+            this.files.set(fileKey, file);
+            
+            if (!this.globalMeta[fileKey]) {
+                this.globalMeta[fileKey] = { liked: false, playCount: 0, addedAt: Date.now() };
             }
 
             try {
@@ -220,7 +233,7 @@ class MusicPlayer {
             } catch (err) {
                 console.error('Failed to parse tags for', file.name, err);
                 this.library.push({
-                    filename: file.name,
+                    filename: `${file.name}_${file.size}`,
                     title: file.name.replace(/\.[^/.]+$/, ""),
                     artist: 'Unknown Artist',
                     albumArt: null,
@@ -260,13 +273,23 @@ class MusicPlayer {
                         const base64String = data.reduce((acc, byte) => acc + String.fromCharCode(byte), '');
                         albumArt = `data:${format};base64,${window.btoa(base64String)}`;
                     }
-                    resolve({
-                        filename: file.name,
-                        title: tags.title || file.name.replace(/\.[^/.]+$/, ""),
-                        artist: tags.artist || 'Unknown Artist',
-                        albumArt: albumArt,
-                        duration: 0
-                    });
+                    const tempAudio = new Audio();
+const tempUrl = URL.createObjectURL(file);
+tempAudio.src = tempUrl;
+tempAudio.addEventListener('loadedmetadata', () => {
+    URL.revokeObjectURL(tempUrl);
+    resolve({
+        filename: `${file.name}_${file.size}`,
+        title: tags.title || file.name.replace(/\.[^/.]+$/, ""),
+        artist: tags.artist || 'Unknown Artist',
+        albumArt,
+        duration: tempAudio.duration
+    });
+}, { once: true });
+tempAudio.addEventListener('error', () => {
+    URL.revokeObjectURL(tempUrl);
+    resolve({ filename: `${file.name}_${file.size}`, title: tags.title || file.name.replace(/\.[^/.]+$/, ""), artist: tags.artist || 'Unknown Artist', albumArt, duration: 0 });
+}, { once: true });
                 },
                 onError: (error) => {
                     reject(error);
@@ -434,8 +457,11 @@ class MusicPlayer {
     playFromLibrary(index) {
         this.context = this.displayedLibrary.map(s => s.filename);
         this.currentIndex = index;
-        this.queue = [];
-        this.renderQueue();
+        if (this.queue.length > 0) {
+            this.showToast('Queue cleared');
+            this.queue = [];
+            this.renderQueue();
+        }
         this.loadSong(this.displayedLibrary[index], true);
     }
 
@@ -448,12 +474,11 @@ class MusicPlayer {
             return;
         }
 
+        if (this.audio.src && this.audio.src.startsWith('blob:')) {
+            URL.revokeObjectURL(this.audio.src);
+        }
         const url = URL.createObjectURL(file);
         this.audio.src = url;
-        this.audio.addEventListener('loadedmetadata', () => {
-            song.duration = this.audio.duration;
-            this.renderLibrary();
-        }, { once: true });
 
         // Update UI
         this.el.playerTitle.textContent = song.title;
@@ -493,13 +518,11 @@ class MusicPlayer {
 
         if (autoPlay) {
             this.audio.play();
-            this.isPlaying = true;
             this.incrementPlayCount(song.filename);
         } else {
             this.isPlaying = false;
+            this.updatePlayerControls();
         }
-        this.updatePlayerControls();
-    }
 
     togglePlay() {
         if (!this.currentSong && this.displayedLibrary.length > 0) {
@@ -507,15 +530,9 @@ class MusicPlayer {
             return;
         }
         if (!this.audio.src) return;
-
-        if (this.isPlaying) {
-            this.audio.pause();
-        } else {
-            this.audio.play();
-        }
-        this.isPlaying = !this.isPlaying;
-        this.updatePlayerControls();
-        this.renderLibrary();
+        this.isPlaying ? this.audio.pause() : this.audio.play();
+        // isPlaying state, updatePlayerControls, renderLibrary
+        // are all handled automatically by the play/pause event listeners
     }
 
     playNext() {
@@ -592,6 +609,27 @@ class MusicPlayer {
         this.el.currentTime.textContent = this.formatTime(this.audio.currentTime);
         const percent = (this.audio.currentTime / this.audio.duration) * 100;
         this.el.seekProgress.style.width = `${percent}%`;
+        this.el.seekBar.style.setProperty('--seek-percent', `${percent}%`);
+    }
+    updateActiveRow() {
+        this.el.mainSongList.querySelectorAll('.song-row').forEach((row, i) => {
+            const song = this.displayedLibrary[i];
+            if (!song) return;
+            const isActive = this.currentSong && this.currentSong.filename === song.filename;
+            row.classList.toggle('active', isActive);
+            const hashCol = row.querySelector('.col-hash');
+            if (hashCol) {
+                hashCol.innerHTML = isActive && this.isPlaying
+                    ? '<span class="icon-play">▶</span>'
+                    : String(i + 1);
+            }
+            const songName = row.querySelector('.song-name');
+            if (songName) songName.style.color = isActive ? 'var(--accent)' : '';
+        });
+        this.el.sidebarList.querySelectorAll('.sidebar-item').forEach((item, i) => {
+            const song = this.displayedLibrary[i];
+            item.classList.toggle('active', !!(song && this.currentSong && song.filename === this.currentSong.filename));
+        });
     }
 
     updateVolumeUI() {

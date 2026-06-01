@@ -6,6 +6,7 @@ import os
 import random
 import re
 import sys
+import getpass
 from html import escape
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -25,11 +26,11 @@ def clean_display_title(text: str, artist: str = "") -> str:
 
 import vlc
 from mutagen import File as MutagenFile
-from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QThread,
     QPoint,
     QSize,
     QParallelAnimationGroup,
@@ -70,7 +71,7 @@ from PyQt6.QtWidgets import (
 )
 
 
-MUSIC_DIR = "/home/kush/Music"
+MUSIC_DIR = os.path.join(os.path.expanduser("~"), "Music")
 PLAYLIST_FILE = os.path.expanduser("~/.local/share/music-player/playlists.json")
 QUEUE_FILE = os.path.expanduser("~/.local/share/music-player/queue.json")
 LIKED_FILE = os.path.expanduser("~/.local/share/music-player/liked.json")
@@ -79,7 +80,7 @@ SESSION_FILE = os.path.expanduser("~/.local/share/music-player/session.json")
 STATS_FILE = os.path.expanduser("~/.local/share/music-player/stats.json")
 SETTINGS_FILE = os.path.expanduser("~/.local/share/music-player/settings.json")
 APP_NAME = "Kush's Music"
-ICON_PATH = "/home/kush/music-player/assets/icon.png"
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.png")
 LIKED_PLAYLIST_NAME = "❤️ Liked Songs"
 RECENT_PLAYLIST_NAME = "🕒 Recently Played"
 MOST_PLAYED_PLAYLIST_NAME = "🔥 Most Played"
@@ -126,23 +127,18 @@ def safe_write_json(path: str, obj) -> None:
     os.replace(tmp, path)
 
 
-def read_track_tags(path: str) -> Tuple[str, str, str]:
-    # Keep it resilient; MP3 tags might be missing.
-    title = ""
-    artist = ""
-    album = ""
+def read_track_tags(path: str) -> tuple:
     try:
-        audio = EasyID3(path)
-        title = audio.get("title", [""])[0] or ""
-        artist = audio.get("artist", [""])[0] or ""
-        album = audio.get("album", [""])[0] or ""
+        audio = MutagenFile(path, easy=True)
+        if audio:
+            title = (audio.get("title") or [""])[0]
+            artist = (audio.get("artist") or [""])[0]
+            album = (audio.get("album") or [""])[0]
+            if title:
+                return title, artist, album
     except Exception:
         pass
-
-    if not title:
-        # Fallback to filename
-        title = os.path.splitext(os.path.basename(path))[0]
-    return title, artist, album
+    return os.path.splitext(os.path.basename(path))[0], "", ""
 
 
 def read_art_pixmap(path: str, size: int = 250) -> Optional[QPixmap]:
@@ -524,8 +520,31 @@ class WaveformWidget(QWidget):
             if x > w - 6:
                 break
 
+class MusicScanThread(QThread):
+    track_found = pyqtSignal(str, str, str, str, str, int)
+    scan_finished = pyqtSignal()
 
+    def __init__(self, music_dir: str):
+        super().__init__()
+        self.music_dir = music_dir
+
+    def run(self) -> None:
+        if not os.path.exists(self.music_dir):
+            self.scan_finished.emit()
+            return
+        for root, _, files in os.walk(self.music_dir):
+            mp3s = [f for f in files if f.lower().endswith(".mp3")]
+            if not mp3s:
+                continue
+            folder = os.path.basename(root)
+            for f in mp3s:
+                path = os.path.join(root, f)
+                title, artist, album = read_track_tags(path)
+                duration_ms = read_duration_ms(path)
+                self.track_found.emit(folder, path, title, artist, album, duration_ms)
+        self.scan_finished.emit()
 class PremiumMusicPlayer(QMainWindow):
+    _ART_CACHE_MAX = 100
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -546,7 +565,7 @@ class PremiumMusicPlayer(QMainWindow):
         self.player = vlc.MediaPlayer()
         self._current_track: Optional[Track] = None
         self._transition_anim: Optional[QPropertyAnimation] = None
-        self._art_cache: Dict[str, QPixmap] = {}
+        self._art_cache: dict = {}
 
         # ----- Data -----
         # library[folder] = list[Track]
@@ -594,10 +613,8 @@ class PremiumMusicPlayer(QMainWindow):
         self._load_liked()
         self._load_recent()
         self._load_queue()
-        self._load_state()
         self._apply_styles()
-        self._maybe_set_initial_view()
-        self._restore_last_state_ui()
+
 
         # Smooth UI animations timer
         self.progress_timer = QTimer()
@@ -752,7 +769,7 @@ class PremiumMusicPlayer(QMainWindow):
         self.settings_btn.setObjectName("ghostBtnSmall")
         self.settings_btn.setToolTip("Settings")
         self.settings_btn.clicked.connect(self._open_settings)
-        self.profile_chip = QLabel("👤 Kush")
+        self.profile_chip = QLabel(f"👤 {getpass.getuser()}")
         self.profile_chip.setObjectName("profileChip")
         top_meta.addWidget(self.settings_btn, 0, Qt.AlignmentFlag.AlignRight)
         top_meta.addStretch(1)
@@ -946,7 +963,7 @@ class PremiumMusicPlayer(QMainWindow):
         self.setStyleSheet(
             """
             QWidget {
-                font-family: "Segoe UI", "Inter", system-ui, -apple-system, Arial, sans-serif;
+                    font-family: "Inter", "Noto Sans", "Liberation Sans", system-ui, Arial, sans-serif;
             }
             QMainWindow#appRoot {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -1297,30 +1314,29 @@ class PremiumMusicPlayer(QMainWindow):
 
     def _load_music(self) -> None:
         self.library.clear()
-        if not os.path.exists(MUSIC_DIR):
-            self.folder_list.clear()
+        self.folder_list.clear()
+        self.folder_list.addItem("⏳ Scanning library…")
+        self._scan_thread = MusicScanThread(MUSIC_DIR)
+        self._scan_thread.track_found.connect(self._on_track_scanned)
+        self._scan_thread.scan_finished.connect(self._on_scan_finished)
+        self._scan_thread.start()
+
+    def _on_track_scanned(self, folder: str, path: str, title: str, artist: str, album: str, duration_ms: int) -> None:
+        self.library.setdefault(folder, [])
+        self.library[folder].append(
+            Track(path=path, title=title, artist=artist, album=album, duration_ms=duration_ms)
+        )
+
+    def _on_scan_finished(self) -> None:
+        self.folder_list.clear()
+        if not self.library:
             self.folder_list.addItem("Music folder not found: " + MUSIC_DIR)
             return
-
-        for root, _, files in os.walk(MUSIC_DIR):
-            mp3s = [f for f in files if f.lower().endswith(".mp3")]
-            if not mp3s:
-                continue
-            folder = os.path.basename(root)
-            self.library.setdefault(folder, [])
-
-            for f in mp3s:
-                path = os.path.join(root, f)
-                title, artist, album = read_track_tags(path)
-                duration_ms = read_duration_ms(path)
-                self.library[folder].append(
-                    Track(path=path, title=title, artist=artist, album=album, duration_ms=duration_ms)
-                )
-
-        # Populate folders
-        self.folder_list.clear()
         for folder in sorted(self.library.keys()):
             self.folder_list.addItem(folder)
+        self._maybe_set_initial_view()
+        self._load_state()
+        self._restore_last_state_ui()
 
     def _load_playlists(self) -> None:
         raw = safe_load_json(PLAYLIST_FILE, default={})
@@ -1532,6 +1548,8 @@ class PremiumMusicPlayer(QMainWindow):
         if pix is None:
             pix = read_art_pixmap(track.path, size=250)
             if pix is not None:
+                if len(self._art_cache) >= self._ART_CACHE_MAX:
+                    del self._art_cache[next(iter(self._art_cache))]
                 self._art_cache[track.path] = pix
         if pix:
             self.art.setFixedSize(220, 220)
@@ -1778,6 +1796,8 @@ class PremiumMusicPlayer(QMainWindow):
                     thumb_pix = raw.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
                 else:
                     thumb_pix = None
+                if len(self._art_cache) >= self._ART_CACHE_MAX:
+                    del self._art_cache[next(iter(self._art_cache))]
                 self._art_cache[t.path + "_thumb"] = thumb_pix if thumb_pix is not None else QPixmap()
             
             row = TrackListRow(
@@ -2239,6 +2259,8 @@ class PremiumMusicPlayer(QMainWindow):
         if pix is None:
             pix = read_art_pixmap(track.path, size=250)
             if pix is not None:
+                if len(self._art_cache) >= self._ART_CACHE_MAX:
+                    del self._art_cache[next(iter(self._art_cache))]
                 self._art_cache[track.path] = pix
         if pix:
             self.art.setFixedSize(220, 220)
@@ -2348,6 +2370,7 @@ class PremiumMusicPlayer(QMainWindow):
         self.queue_list.setCurrentRow(new_idx)
         self._save_queue()
 
+    # REPLACE WITH:
     def closeEvent(self, event) -> None:
         if self._current_track is not None:
             try:
@@ -2355,6 +2378,11 @@ class PremiumMusicPlayer(QMainWindow):
             except Exception:
                 pos = 0
             self._save_state(self._current_track.path, pos, was_playing=bool(self.player.is_playing()))
+        try:
+            self.player.stop()
+            self.player.release()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def _sync_mini_player(self) -> None:
@@ -2429,7 +2457,7 @@ class PremiumMusicPlayer(QMainWindow):
 def run() -> None:
     app = QApplication(sys.argv)
     QApplication.setStyle("Fusion")
-    app_font = QFont("Inter, Segoe UI, SF Pro Display, Roboto, sans-serif", 10)
+    app_font = QFont("Inter", 10)
     app_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(app_font)
     app.setApplicationName("kush-music-player")

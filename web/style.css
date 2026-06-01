@@ -580,6 +580,7 @@ body {
     position: relative;
     display: flex;
     align-items: center;
+    --seek-percent:0%;  
 }
 
 .progress-container:hover .progress-fill {
@@ -593,6 +594,19 @@ body {
     width: 0%;
     transition: background 0.2s ease;
     pointer-events: none;
+}
+.progress-container:hover::after {
+    content: '';
+    position: absolute;
+    left: calc(var(--seek-percent) - 6px);
+    top: 50%;
+    transform: translateY(-50%);
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--text-main);
+    pointer-events: none;
+    z-index: 2;
 }
 
 .volume-container {
@@ -877,6 +891,7 @@ body {
     color: var(--text-sec);
     transition: all 0.2s ease;
     position: relative;
+    overflow: visible;
 }
 
 .shuffle-btn:hover,
@@ -885,8 +900,8 @@ body {
     transform: scale(1.1);
 }
 
-.active-control {
-    color: var(--accent) !important;
+.control-btn.active-control {
+    color: var(--accent);
 }
 
 .active-control::after {
